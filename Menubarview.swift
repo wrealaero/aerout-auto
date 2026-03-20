@@ -153,7 +153,7 @@ struct MenuBarView: View {
             .padding(.bottom, 6)
         }
     }
-
+ 
     func isActive(_ p: ClickPreset) -> Bool {
         abs(p.cps - clicker.cps) < 0.01 &&
         abs(p.duty - clicker.duty) < 0.01 &&

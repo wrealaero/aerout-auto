@@ -78,11 +78,15 @@ class AutoClicker: ObservableObject {
     @Published var isRecording       = false
     @Published var sessionClicks     = 0
     @Published var hasAccessibility  = false
-    @Published var presets: [ClickPreset]    = []
-    @Published var quickSlots: [UUID?]       = [nil, nil, nil, nil]
+    @Published var accessibilityDenied = false
+    @Published var presets: [ClickPreset] = []
+    @Published var quickSlots: [UUID?]    = [nil, nil, nil, nil]
 
-    private var clickSource: DispatchSourceTimer?
     private let clickQueue = DispatchQueue(label: "aerout.clicker", qos: .userInteractive)
+    private var clickSource: DispatchSourceTimer?
+
+    private let stateLock = NSLock()
+    private var runningState = false
 
     private var localKey:     Any?; private var globalKey:     Any?
     private var localKeyUp:   Any?; private var globalKeyUp:   Any?
@@ -91,16 +95,25 @@ class AutoClicker: ObservableObject {
 
     private init() { loadSettings(); setupMonitors(); checkAccessibility() }
     deinit { removeMonitors() }
+
     func checkAccessibility() {
         DispatchQueue.main.async { self.hasAccessibility = AXIsProcessTrusted() }
     }
 
     func requestAccessibility() {
+        guard !AXIsProcessTrusted() else { checkAccessibility(); return }
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         AXIsProcessTrustedWithOptions(opts)
         for t in [2.0, 5.0, 10.0, 20.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + t) { self.checkAccessibility() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + t) {
+                self.hasAccessibility = AXIsProcessTrusted()
+            }
         }
+    }
+
+    func requestInputMonitoring() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")!
+        NSWorkspace.shared.open(url)
     }
 
     private func setupMonitors() {
@@ -192,91 +205,137 @@ class AutoClicker: ObservableObject {
         }
     }
 
-    func toggle() { isRunning ? stop() : start() }
+    func toggle() {
+        stateLock.lock()
+        let shouldStop = runningState
+        stateLock.unlock()
+        if shouldStop { stop() } else { start() }
+    }
 
     func start() {
-        guard hasAccessibility else { requestAccessibility(); return }
-        guard !isRunning else { return }
-        isRunning = true; sessionClicks = 0
+        guard hasAccessibility else {
+
+            DispatchQueue.main.async { self.checkAccessibility() }
+            return
+        }
+        stateLock.lock()
+        guard !runningState else { stateLock.unlock(); return }
+        runningState = true
+        stateLock.unlock()
+
+        DispatchQueue.main.async {
+            self.isRunning = true
+            self.sessionClicks = 0
+        }
         startTimer()
         NotificationCenter.default.post(name: .clickerStateChanged, object: nil)
     }
 
     func stop() {
-        guard isRunning else { return }
-        isRunning = false
-        clickSource?.cancel(); clickSource = nil
+        stateLock.lock()
+        guard runningState else { stateLock.unlock(); return }
+        runningState = false
+        stateLock.unlock()
+
+        clickSource?.cancel()
+        clickSource = nil
+
+        DispatchQueue.main.async { self.isRunning = false }
         NotificationCenter.default.post(name: .clickerStateChanged, object: nil)
     }
 
+    private var snapCPS:  Double      = 10.0
+    private var snapDuty: Double      = 50.0
+    private var snapBtn:  MouseButton = .left
+    private var snapScreenH: Double   = 900.0
+
     private func startTimer() {
+
+        snapCPS     = cps
+        snapDuty    = duty
+        snapBtn     = mouseBtn
+        snapScreenH = Double(NSScreen.main?.frame.height ?? 900.0)
+
         clickSource?.cancel()
         let src = DispatchSource.makeTimerSource(flags: [], queue: clickQueue)
-        let intervalNs = UInt64(1_000_000_000.0 / max(cps, 0.01))
-        src.schedule(deadline: .now(), repeating: .nanoseconds(Int(intervalNs)), leeway: .nanoseconds(0))
+        let intervalNs = UInt64(1_000_000_000.0 / max(snapCPS, 0.01))
+        src.schedule(deadline: .now(), repeating: .nanoseconds(Int(intervalNs)), leeway: .nanoseconds(500))
         src.setEventHandler { [weak self] in self?.fire() }
         src.resume()
         clickSource = src
     }
 
+    private func postClick(type: CGEventType, button: CGMouseButton, at pt: CGPoint) {
+        let src = CGEventSource(stateID: .combinedSessionState)
+        guard let ev = CGEvent(mouseEventSource: src,
+                               mouseType: type,
+                               mouseCursorPosition: pt,
+                               mouseButton: button) else { return }
+        ev.setIntegerValueField(.mouseEventDeltaX, value: 0)
+        ev.setIntegerValueField(.mouseEventDeltaY, value: 0)
+        ev.post(tap: .cgSessionEventTap)
+    }
+
     private func fire() {
-        let loc  = NSEvent.mouseLocation
-        let sh   = NSScreen.main?.frame.height ?? 900
-        let pt   = CGPoint(x: loc.x, y: sh - loc.y)
-        let btn  = mouseBtn
-        let intervalSec = 1.0 / max(cps, 0.01)
-        let holdSec     = intervalSec * min(max(duty, 0.01), 99.99) / 100.0
+        stateLock.lock()
+        let running = runningState
+        stateLock.unlock()
+        guard running else { return }
 
-        let srcDown = CGEventSource(stateID: .hidSystemState)
-        CGEvent(mouseEventSource: srcDown, mouseType: btn.cgDownType,
-                mouseCursorPosition: pt, mouseButton: btn.cgButton)?.post(tap: .cghidEventTap)
+        let btn         = snapBtn
+        let intervalSec = 1.0 / max(snapCPS, 0.01)
+        let holdSec     = intervalSec * min(max(snapDuty, 0.01), 99.99) / 100.0
+        let sh          = snapScreenH
 
-        clickQueue.asyncAfter(deadline: .now() + holdSec) { [weak self] in
-            guard let self = self, self.isRunning else { return }
-            let srcUp = CGEventSource(stateID: .hidSystemState)
-            CGEvent(mouseEventSource: srcUp, mouseType: btn.cgUpType,
-                    mouseCursorPosition: pt, mouseButton: btn.cgButton)?.post(tap: .cghidEventTap)
-            DispatchQueue.main.async { self.sessionClicks += 1 }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            let running = self.runningState
+            self.stateLock.unlock()
+            guard running else { return }
+
+            let loc = NSEvent.mouseLocation
+            let pt  = CGPoint(x: loc.x, y: CGFloat(sh) - loc.y)
+            self.postClick(type: btn.cgDownType, button: btn.cgButton, at: pt)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + holdSec) { [weak self] in
+                guard let self = self else { return }
+                self.stateLock.lock()
+                let stillRunning = self.runningState
+                self.stateLock.unlock()
+                guard stillRunning else { return }
+
+                let loc2 = NSEvent.mouseLocation
+                let pt2  = CGPoint(x: loc2.x, y: CGFloat(sh) - loc2.y)
+                self.postClick(type: btn.cgUpType, button: btn.cgButton, at: pt2)
+                self.sessionClicks += 1
+            }
         }
     }
 
-    func saveAsPreset(name: String) {
-        presets.append(ClickPreset(name: name, cps: cps, duty: duty, button: mouseBtn))
-        saveSettings()
-    }
-
-    func loadPreset(_ p: ClickPreset) {
-        cps = p.cps; duty = p.duty; mouseBtn = p.button; saveSettings()
-    }
-
+    func saveAsPreset(name: String) { presets.append(ClickPreset(name: name, cps: cps, duty: duty, button: mouseBtn)); saveSettings() }
+    func loadPreset(_ p: ClickPreset) { cps = p.cps; duty = p.duty; mouseBtn = p.button; saveSettings() }
     func deletePresets(at i: IndexSet) { presets.remove(atOffsets: i); saveSettings() }
-
     func renamePreset(id: UUID, to n: String) {
         if let i = presets.firstIndex(where: { $0.id == id }) { presets[i].name = n; saveSettings() }
     }
-
     func importPreset(from code: String) -> Bool {
         guard let p = ClickPreset.fromCode(code) else { return false }
         presets.append(p); saveSettings(); return true
     }
-
     func presetForSlot(_ slot: Int) -> ClickPreset? {
         guard slot < quickSlots.count, let id = quickSlots[slot] else { return nil }
         return presets.first(where: { $0.id == id })
     }
-
-    func assignSlot(_ slot: Int, preset: ClickPreset?) {
-        quickSlots[slot] = preset?.id
-        saveSettings()
-    }
+    func assignSlot(_ slot: Int, preset: ClickPreset?) { quickSlots[slot] = preset?.id; saveSettings() }
 
     func saveSettings() {
         let d = UserDefaults.standard
         d.set(cps, forKey: "aa_cps"); d.set(duty, forKey: "aa_duty")
         d.set(mouseBtn.rawValue, forKey: "aa_btn")
         d.set(activationMode.rawValue, forKey: "aa_mode")
-        if let hd = try? JSONEncoder().encode(hotkey)     { d.set(hd, forKey: "aa_hotkey")    }
-        if let pd = try? JSONEncoder().encode(presets)    { d.set(pd, forKey: "aa_presets")   }
+        if let hd = try? JSONEncoder().encode(hotkey)     { d.set(hd, forKey: "aa_hotkey")     }
+        if let pd = try? JSONEncoder().encode(presets)    { d.set(pd, forKey: "aa_presets")    }
         if let qd = try? JSONEncoder().encode(quickSlots) { d.set(qd, forKey: "aa_quickslots") }
     }
 
@@ -284,11 +343,13 @@ class AutoClicker: ObservableObject {
         let d = UserDefaults.standard
         if let v = d.object(forKey: "aa_cps")  as? Double { cps  = v }
         if let v = d.object(forKey: "aa_duty") as? Double { duty = v }
-        if let s = d.string(forKey: "aa_btn"),  let b = MouseButton(rawValue: s)     { mouseBtn       = b }
-        if let s = d.string(forKey: "aa_mode"), let m = ActivationMode(rawValue: s)  { activationMode = m }
+        if let s = d.string(forKey: "aa_btn"),  let b = MouseButton(rawValue: s)    { mouseBtn       = b }
+        if let s = d.string(forKey: "aa_mode"), let m = ActivationMode(rawValue: s) { activationMode = m }
         if let hd = d.data(forKey: "aa_hotkey"),     let h = try? JSONDecoder().decode(HotkeyTrigger.self, from: hd)  { hotkey     = h }
         if let pd = d.data(forKey: "aa_presets"),    let p = try? JSONDecoder().decode([ClickPreset].self, from: pd)  { presets    = p }
         if let qd = d.data(forKey: "aa_quickslots"), let q = try? JSONDecoder().decode([UUID?].self, from: qd)        { quickSlots = q }
+
+        runningState = false
     }
 
     var intervalMs: Double { 1000.0 / max(cps, 0.01) }

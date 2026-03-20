@@ -24,7 +24,6 @@ let kBgThemes: [BgTheme] = [
     .init(name:"Charcoal", color:Color(red:0.12,green:0.12,blue:0.14)),
 ]
 
-
 struct ContentView: View {
     @ObservedObject var clicker: AutoClicker
     @AppStorage("accentIndex") var accentIndex: Int = 0
@@ -90,6 +89,7 @@ struct ContentView: View {
                     .font(.system(size: 9)).foregroundColor(.secondary)
             }
             Spacer()
+
             HStack(spacing: 5) {
                 Circle()
                     .fill(clicker.isRunning ? Color.green : Color.gray.opacity(0.4))
@@ -142,41 +142,63 @@ extension ContentView {
     }
 
     var accessBanner: some View {
-        Button { clicker.requestAccessibility() } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "lock.shield").font(.system(size: 18)).foregroundColor(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Accessibility Permission Required").font(.system(size: 11, weight: .semibold))
-                    Text("Click here to open System Preferences and grant access").font(.system(size: 10)).foregroundColor(.secondary)
+        VStack(spacing: 6) {
+            Button { clicker.requestAccessibility() } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "cursorarrow.click").font(.system(size: 15)).foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("1. Accessibility — Required to click").font(.system(size: 11, weight: .semibold))
+                        Text("Tap to open System Preferences and grant access").font(.system(size: 10)).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "arrow.right.circle").foregroundColor(.orange).font(.system(size: 13))
                 }
-                Spacer()
-                Image(systemName: "arrow.right.circle").foregroundColor(.orange)
-            }
-            .padding(11)
-            .background(Color.orange.opacity(0.08))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.25), lineWidth: 1))
-            .cornerRadius(8)
-            .contentShape(Rectangle())
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.3), lineWidth: 1))
+                .cornerRadius(8)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain)
+
+            Button { clicker.requestInputMonitoring() } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "keyboard").font(.system(size: 15)).foregroundColor(.yellow)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("2. Input Monitoring — Required for hotkey").font(.system(size: 11, weight: .semibold))
+                        Text("Without this the hotkey won't work in-game").font(.system(size: 10)).foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "arrow.right.circle").foregroundColor(.yellow).font(.system(size: 13))
+                }
+                .padding(10)
+                .background(Color.yellow.opacity(0.06))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.25), lineWidth: 1))
+                .cornerRadius(8)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 
     var speedCard: some View {
         card(title: "SPEED", icon: "speedometer") {
             VStack(spacing: 8) {
                 HStack(alignment: .top, spacing: 0) {
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Clicks Per Second").font(.system(size: 10)).foregroundColor(.secondary)
                         DecimalField(value: $clicker.cps, suffix: "CPS", accent: accent, lo: 0.01, hi: 1000)
                     }
                     Spacer()
+
                     Divider().frame(height: 52).padding(.horizontal, 8)
                     Spacer()
+
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Click Duty").font(.system(size: 10)).foregroundColor(.secondary)
                         DecimalField(value: $clicker.duty, suffix: "%", accent: accent, lo: 0.01, hi: 99.99)
                     }
                 }
+
                 HStack {
                     HStack(spacing: 3) {
                         Text("Interval:").font(.system(size: 10)).foregroundColor(.secondary)
@@ -236,6 +258,7 @@ extension ContentView {
                 }
 
                 Divider().opacity(0.3)
+
                 HStack(spacing: 16) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Mouse Button").font(.system(size: 10)).foregroundColor(.secondary)
@@ -366,6 +389,7 @@ struct QuickSlotButton: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+
             if preset != nil {
                 Button("Clear Slot") { clicker.assignSlot(slot, preset: nil) }
                 Divider()
